@@ -1,0 +1,135 @@
+name: Scan Base Images with Trivy
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Chỉ scan 1 image cụ thể (để trống = scan tất cả trong images.txt)"
+        required: false
+        default: ""
+
+jobs:
+  scan:
+    name: Scan Base Image(s)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+          # Tải HTML template chính thức của Trivy
+          mkdir -p /tmp/trivy-templates
+          wget -q -O /tmp/trivy-templates/html.tpl \
+            https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl
+
+      - name: Prepare image list
+        run: |
+          if [ -n "${{ github.event.inputs.image }}" ]; then
+            echo "${{ github.event.inputs.image }}" > /tmp/images-to-scan.txt
+          else
+            grep -v '^#' images.txt | grep -v '^$' > /tmp/images-to-scan.txt || true
+          fi
+
+          if [ ! -s /tmp/images-to-scan.txt ]; then
+            echo "Không có image nào để scan"
+            exit 1
+          fi
+
+          echo "Danh sách image sẽ scan:"
+          cat /tmp/images-to-scan.txt
+          echo ""
+
+      - name: Scan base images (Table + HTML + SARIF)
+        run: |
+          mkdir -p reports
+          FAILED=0
+
+          while IFS= read -r IMAGE || [ -n "$IMAGE" ]; do
+            # Tạo tên file an toàn từ tên image
+            SAFE_NAME=$(echo "$IMAGE" | sed 's/[\/:]/_/g' | sed 's/[^a-zA-Z0-9._-]/_/g')
+
+            echo "=============================================="
+            echo "Scanning: $IMAGE"
+            echo "=============================================="
+
+            # 1. Table (hiển thị trên log Actions) + fail nếu có CRITICAL/HIGH
+            if trivy image \
+              --severity CRITICAL,HIGH \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --format table \
+              --timeout 10m \
+              "$IMAGE"; then
+              echo "✅ $IMAGE → CLEAN"
+            else
+              echo "❌ $IMAGE → CÓ LỖ HỔNG CRITICAL/HIGH"
+              FAILED=1
+            fi
+
+            # 2. HTML report (đẹp, tải về xem)
+            trivy image \
+              --severity CRITICAL,HIGH,MEDIUM \
+              --format template \
+              --template "@/tmp/trivy-templates/html.tpl" \
+              --output "reports/${SAFE_NAME}.html" \
+              --timeout 10m \
+              "$IMAGE" || true
+
+            # 3. SARIF report (để upload lên GitHub Security)
+            trivy image \
+              --severity CRITICAL,HIGH,MEDIUM \
+              --format sarif \
+              --output "reports/${SAFE_NAME}.sarif" \
+              --timeout 10m \
+              "$IMAGE" || true
+
+            echo ""
+          done < /tmp/images-to-scan.txt
+
+          if [ $FAILED -eq 1 ]; then
+            echo "Có base image chứa lỗ hổng CRITICAL/HIGH (đã có bản vá)."
+            exit 1
+          fi
+
+          echo "Tất cả base image đều đạt yêu cầu."
+
+      - name: Upload HTML reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-html-reports
+          path: reports/*.html
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload SARIF reports (artifact)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-sarif-reports
+          path: reports/*.sarif
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: reports/

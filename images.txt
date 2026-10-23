@@ -1,0 +1,14 @@
+# Danh sách base image cần kiểm tra trước khi sử dụng
+# Mỗi dòng 1 image
+# Dòng bắt đầu bằng # sẽ bị bỏ qua
+
+eclipse-temurin:25-jre
+eclipse-temurin:21-jre
+eclipse-temurin:17-jre
+
+# Thêm image khác nếu cần, ví dụ:
+# python:3.12-slim
+# node:22-alpine
+# nginx:1.27-alpine
+# amazoncorretto:21
+# ghcr.io/your-org/custom-base:1.0
